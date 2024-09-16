@@ -1,6 +1,6 @@
 from collections import defaultdict
 from json import dumps, load
-from metapool import load_sample_sheet
+from metapool import load_sample_sheet, is_blank
 from os import makedirs, walk, listdir
 from os.path import join, exists, split, basename, dirname, abspath
 from sequence_processing_pipeline.ConvertJob import ConvertJob
@@ -83,13 +83,13 @@ class FailedSamplesRecord:
 
 
 class Step:
-    '''
+    """
     The base Step class wraps the creation and running of the Job classes
     that are common to both Amplicon and Metagenomic Pipeline. Functionality
     specific to one pipeline or the other is handled in the appropriate
     subclass and makes calls to this base class as needed. In this way the
     codebase is kept DRY.
-    '''
+    """
 
     AMPLICON_TYPE = 'Amplicon'
     METAGENOMIC_TYPE = 'Metagenomic'
@@ -196,10 +196,10 @@ class Step:
             # append a replication number to each name to
             # make it unique from other replicates.
             # return ('%s_r%s' % (a_name, result[1]), True)
-            return ('%s_r%s' % (a_name, repl_num), True)
+            return '%s_r%s' % (a_name, repl_num), True
         else:
             # this is a normal pre-prep or sample-sheet.
-            return (a_name, False)
+            return a_name, False
 
     def generate_special_map(self, qclient):
         # this function should be able to be tested by passing in simulated =
@@ -224,11 +224,11 @@ class Step:
         raise ValueError("get_data_type() not implemented for base-class.")
 
     def update_prep_templates(self, qclient):
-        '''
+        """
         Update prep-template info in Qiita. Get dict of prep-ids by study-id.
         :param qclient:
         :return: A dict of lists of prep-ids, keyed by study-id.
-        '''
+        """
         results = defaultdict(list)
 
         for study_id in self.prep_file_paths:
@@ -271,12 +271,12 @@ class Step:
 
     @classmethod
     def get_samples_in_qiita(cls, qclient, qiita_id):
-        '''
+        """
         Obtain lists for sample-names and tube-ids registered in Qiita.
         :param qclient: QiitaClient object
         :param qiita_id: Qiita ID for the project in question.
         :return: a tuple of lists, one for sample-names, another for tube-ids.
-        '''
+        """
         samples = qclient.get(f'/api/v1/study/{qiita_id}/samples')
 
         # remove Qiita ID as a prefix from the sample-names.
@@ -292,7 +292,7 @@ class Step:
         else:
             tids = None
 
-        return (samples, tids)
+        return samples, tids
 
     def _convert_bcl_to_fastq(self, config, input_file_path):
         convert_job = ConvertJob(self.pipeline.run_dir,
@@ -402,7 +402,7 @@ class Step:
 
     def _helper_process_blanks(self):
         results = [x for x in listdir(self.pipeline.output_path) if
-                   x.endswith('_blanks.tsv')]
+                   self.pipeline.is_sif_fp(x)]
 
         results.sort()
 
@@ -655,31 +655,36 @@ class Step:
                 raise PipelineError(f"'{cmd}' returned {return_code}")
 
     def generate_sifs(self, qclient):
-        from_qiita = {}
-
-        for study_id in self.prep_file_paths:
-            samples = list(qclient.get(f'/api/v1/study/{study_id}/samples'))
-            from_qiita[study_id] = samples
-
         add_sif_info = []
 
-        qid_pn_map = {proj['qiita_id']: proj['project_name'] for
-                      proj in self.pipeline.get_project_info()}
-
-        # in case we really do need to query for samples again:
-        # assume set of valid study_ids can be determined from prep_file_paths.
-        for study_id in from_qiita:
-            samples = from_qiita[study_id]
-            # generate a list of (sample-name, project-name) pairs.
-            project_name = qid_pn_map[study_id]
-            samples = [(x, project_name) for x in samples]
-            add_sif_info.append(pd.DataFrame(data=samples,
-                                             columns=['sample_name',
-                                                      'project_name']))
-
-        # convert the list of dataframes into a single dataframe.
-        add_sif_info = pd.concat(add_sif_info,
-                                 ignore_index=True).drop_duplicates()
+        # After discussion with Charlie, I don't think this is necessary. This
+        # code sends in all the qiita sample names for the project to the
+        # pipeline method so it can put any blanks in that set into the sif
+        # it creates--but update_blanks_in_qiita later filters back OUT any
+        # blanks in the sif that are also already in qiita, so why bother?
+        # from_qiita = {}
+        #
+        # for study_id in self.prep_file_paths:
+        #     samples = list(qclient.get(f'/api/v1/study/{study_id}/samples'))
+        #     from_qiita[study_id] = samples
+        #
+        # qid_pn_map = {proj['qiita_id']: proj['project_name'] for
+        #               proj in self.pipeline.get_project_info()}
+        #
+        # # in case we really do need to query for samples again:
+        # # assume set of valid study_ids can be determined from prep_file_paths.
+        # for study_id in from_qiita:
+        #     samples = from_qiita[study_id]
+        #     # generate a list of (sample-name, project-name) pairs.
+        #     project_name = qid_pn_map[study_id]
+        #     samples = [(x, project_name) for x in samples]
+        #     add_sif_info.append(pd.DataFrame(data=samples,
+        #                                      columns=['sample_name',
+        #                                               'project_name']))
+        #
+        # # convert the list of dataframes into a single dataframe.
+        # add_sif_info = pd.concat(add_sif_info,
+        #                          ignore_index=True).drop_duplicates()
 
         # generate SIF files with add_sif_info as additional metadata input.
         # duplicate sample-names and non-blanks will be handled properly.
@@ -691,6 +696,7 @@ class Step:
         return self.prep_file_paths
 
     def _get_tube_ids_from_qiita(self, qclient):
+        # TODO: what is this comment??
         # Update get_project_info() so that it can return a list of
         # samples in projects['samples']. Include blanks in projects['blanks']
         # just in case there are duplicate qiita_ids
@@ -748,10 +754,15 @@ class Step:
             else:
                 samples = set(self.pipeline.get_sample_names(p_name))
 
-            # do not include BLANKs. If they are unregistered, we will add
+            # do not include blanks. If they are unregistered, we will add
             # them downstream.
-            samples = {smpl for smpl in samples
-                       if not smpl.startswith('BLANK')}
+            # Q: what is this comment about adding them downstream? Is that
+            # referring to update_blanks_in_qiita() in execute_pipeline()?
+            # TODO: in the future, this will probably need to change to check
+            #  whether a sample is a control (incl a katharoseq control), not
+            #  just a blank.
+            samples = {smpl for smpl in samples if
+                       not self.pipeline.sample_sheet.sample_is_a_blank(smpl)}
 
             msgs.append(f"The total number of samples found in {p_name} that "
                         f"aren't BLANK is: {len(samples)}")
@@ -866,7 +877,10 @@ class Step:
         for i in df.index:
             sample_name = df.at[i, "sample_name"]
             # blanks do not get their names swapped.
-            if sample_name.startswith('BLANK'):
+            # TODO: this doesn't have any sample context, which is a problem
+            #  for the new-style control identification. Also, eventually this
+            #  will have to change from just blanks to including katharoseq
+            if is_blank(sample_name):
                 continue
 
             # remove leading zeroes if they exist to match Qiita results.
@@ -905,10 +919,13 @@ class Step:
                                                       self.tube_id_map[
                                                           qiita_id])
 
+    # TODO: eventually will have to generalize this from blanks to controls to
+    #  support katharoseq controls; this should basically just be renaming.
     def update_blanks_in_qiita(self, qclient):
         for sif_path in self.sifs:
             # get study_id from sif_file_name ...something_14385_blanks.tsv
-            study_id = sif_path.split('_')[-2]
+            #study_id = sif_path.split('_')[-2]
+            study_id = self.pipeline.get_qiita_id_from_sif_fp(sif_path)
 
             df = pd.read_csv(sif_path, delimiter='\t', dtype=str)
 
@@ -916,19 +933,17 @@ class Step:
             df['sample_name'] = f'{study_id}.' + df['sample_name'].astype(str)
 
             # SIFs only contain BLANKs. Get the list of potentially new BLANKs.
-            blank_ids = [i for i in df['sample_name'] if 'blank' in i.lower()]
-            blanks = df[df['sample_name'].isin(blank_ids)]['sample_name']
-            if len(blanks) == 0:
+            blanks_sample_names = df['sample_name']
+            if len(blanks_sample_names) == 0:
                 # we have nothing to do so let's return early
                 return
 
-            # Get list of BLANKs already registered in Qiita.
+            # Get list of samples already registered in Qiita; don't need to
+            # limit to blanks.
             from_qiita = qclient.get(f'/api/v1/study/{study_id}/samples')
-            from_qiita = [x for x in from_qiita if
-                          x.startswith(f'{study_id}.BLANK')]
 
-            # Generate list of BLANKs that need to be ADDED to Qiita.
-            new_blanks = (set(blanks) | set(from_qiita)) - set(from_qiita)
+            # Generate list of BLANKs that are not already in Qiita
+            new_blanks = set(blanks_sample_names) - set(from_qiita)
 
             if len(new_blanks):
                 # Generate dummy entries for each new BLANK, if any.
@@ -936,6 +951,7 @@ class Step:
                                          'info')['categories']
 
                 # initialize payload w/required dummy categories
+                # TODO: check this default w/Gail
                 data = {i: {c: 'control sample' for c in categories} for i in
                         new_blanks}
 
@@ -972,14 +988,17 @@ class Step:
                 raise PipelineError('\n'.join(msgs))
 
     def execute_pipeline(self, qclient, increment_status, update=True,
-                         skip_steps=[]):
-        '''
+                         skip_steps=None):
+        """
         Executes steps of pipeline in proper sequence.
         :param qclient: Qiita client library or equivalent.
         :param increment_status: callback function to increment status.
         :param update: Set False to prevent updates to Qiita.
         :return: None
-        '''
+        """
+        if skip_steps is None:
+            skip_steps = []
+
         # this is performed even in the event of a restart.
         self.generate_special_map(qclient)
 
